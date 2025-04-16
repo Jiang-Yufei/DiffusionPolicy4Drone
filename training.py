@@ -57,12 +57,18 @@ class PlannerData(Dataset):
         self.img_filename = []
         self.odom_list    = []
         self.goal_list    = []
+        self.traj_list    = []
+        self.traj_length = 32
 
         for ahead in range(1, max_episode+1, goal_step):
             for i in range(N):
                 odom = odom_list[i]
                 goal = odom_list[min(i+ahead, N-1)]
                 goal = (pp.Inv(odom) @ goal)
+                if i+self.traj_length >= N-1:
+                    continue
+                traj = odom_list[i:min(i+self.traj_length, N-1)]
+                traj = [pp.Inv(odom) @ t for t in traj]
                 # gp = goal.tensor()
                 # if (gp[0] > 1.0 and gp[1]/gp[0] < 1.2 and gp[1]/gp[0] > -1.2 and torch.norm(gp[:3]) > 1.0):
                 if torch.norm(goal.tensor()[:3]) < min_distance:
@@ -71,6 +77,10 @@ class PlannerData(Dataset):
                 self.img_filename.append(img_filename_list[i])
                 self.odom_list.append(odom.tensor())
                 self.goal_list.append(goal.tensor())
+                self.traj_list.append([t.tensor() for t in traj])
+
+                # print("odom_list type: ", type(self.odom_list))
+                # print("traj_list type: ", type(self.traj_list))
 
         N = len(self.odom_list)
 
@@ -92,10 +102,12 @@ class PlannerData(Dataset):
             self.img_filename = itemgetter(*train_index)(self.img_filename)
             self.odom_list    = itemgetter(*train_index)(self.odom_list)
             self.goal_list    = itemgetter(*train_index)(self.goal_list)
+            self.traj_list    = itemgetter(*train_index)(self.traj_list)
         else:
             self.img_filename = itemgetter(*test_index)(self.img_filename)
             self.odom_list    = itemgetter(*test_index)(self.odom_list)
             self.goal_list    = itemgetter(*test_index)(self.goal_list)
+            self.traj_list    = itemgetter(*test_index)(self.traj_list)
 
         assert len(self.odom_list) == len(self.img_filename), "odom numbers should match with image numbers"
         
@@ -118,7 +130,7 @@ class PlannerData(Dataset):
         image = Image.fromarray(image)
         image = self.transform(image).expand(3, -1, -1)
 
-        return image, self.odom_list[idx], self.goal_list[idx]
+        return image, self.odom_list[idx], self.goal_list[idx], self.traj_list[idx]
 
 class PlannerNetTrainer():
     def __init__(self):
@@ -240,7 +252,8 @@ class PlannerNetTrainer():
                     image = inputs[0].cuda(self.args.gpu_id)
                     odom  = inputs[1].cuda(self.args.gpu_id)
                     goal  = inputs[2].cuda(self.args.gpu_id)
-
+                    traj  = inputs[3].cuda(self.args.gpu_id)
+        print("traj_size: ", traj.shape)
 
         #################################################################
         pred_horizon = 32
