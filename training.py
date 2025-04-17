@@ -20,6 +20,9 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.training_utils import EMAModel
 from diffusers.optimization import get_scheduler
 
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+
 from dataloader import MultiEpochsDataLoader
 import argparse
 
@@ -185,7 +188,7 @@ class PlannerNetTrainer():
             self.val_loader_list   = []
             
 
-            for env_name in tqdm.tqdm(self.env_list):
+            for env_name in tqdm(self.env_list):
                 if not self.args.training and track_id != test_env_id:
                     track_id += 1
                     continue
@@ -276,7 +279,7 @@ class PlannerNetTrainer():
             for batch_idx, inputs in enumerater:
                 if torch.cuda.is_available():
                     image = inputs[0].cuda(self.args.gpu_id)
-                    odom  = inputs[1].cuda(self.args.gpu_id)
+                    # odom  = inputs[1].cuda(self.args.gpu_id)
                     goal  = inputs[2].cuda(self.args.gpu_id)
                     traj  = inputs[3].cuda(self.args.gpu_id)[0:3]
 
@@ -315,7 +318,7 @@ class PlannerNetTrainer():
             # demo
             with torch.no_grad():
                 # example inputs
-                agent_pos = odom.unsqueeze(1).expand(-1, obs_horizon, -1)[...,0:3]
+                agent_pos = goal.unsqueeze(1).expand(-1, obs_horizon, -1)[...,0:3]
                 image = image.unsqueeze(1).expand(-1, obs_horizon, -1, -1, -1)
                 # vision encoder
                 image_features = nets['vision_encoder']( # 64 2 3 96 96
@@ -368,7 +371,7 @@ class PlannerNetTrainer():
         self.lowdim_obs_dim = 3
         self.goal_dim = 3
         # observation feature has 514 dims in total per step
-        self.obs_dim = self.vision_feature_dim + self.lowdim_obs_dim + self.goal_dim
+        self.obs_dim = self.vision_feature_dim + self.goal_dim
         self.action_dim = 3
 
         # vision encoder
@@ -405,8 +408,6 @@ class PlannerNetTrainer():
 
 
     def train(self):
-        from tqdm import tqdm
-
         self.ema = EMAModel(
             parameters=self.nets.parameters(),
             power=0.75)
@@ -435,7 +436,7 @@ class PlannerNetTrainer():
                     for batch_idx, inputs in enumerater:
                         # === Load and transfer to GPU ===
                         image = inputs[0].cuda(self.args.gpu_id)                       
-                        odom  = inputs[1].cuda(self.args.gpu_id)[...,0:3]
+                        # odom  = inputs[1].cuda(self.args.gpu_id)[...,0:3]
                         goal  = inputs[2].cuda(self.args.gpu_id)[...,0:3]
                         traj  = inputs[3].cuda(self.args.gpu_id)[...,0:3]
                          # (B, traj_len, 3)
@@ -443,13 +444,13 @@ class PlannerNetTrainer():
                         # === Format batch like in test() ===
                         B = image.shape[0]
                         image = image.unsqueeze(1).expand(-1, self.obs_horizon, -1, -1, -1)        
-                        agent_pos = odom.unsqueeze(1).expand(-1, self.obs_horizon, -1)     
+                        # agent_pos = odom.unsqueeze(1).expand(-1, self.obs_horizon, -1)     
                         agent_goal = goal.unsqueeze(1).expand(-1, self.obs_horizon, -1)      
 
                         image_features = self.nets['vision_encoder'](image.flatten(end_dim=1))   
                         image_features = image_features.reshape(B, self.obs_horizon, -1)          
 
-                        obs = torch.cat([image_features, agent_pos, agent_goal], dim=-1)                      
+                        obs = torch.cat([image_features, agent_goal], dim=-1)                      
                         obs_cond = obs.flatten(start_dim=1)                                     
 
                         # === Diffusion training ===
@@ -490,8 +491,106 @@ class PlannerNetTrainer():
         torch.save(self.nets.state_dict(), self.args.model_save)
 
         return None
+        
+    def validate(self):
+        print("Loading trained model for validation...")
+        
+        # Create EMA nets with same architecture
+        ema_nets = nn.ModuleDict({
+            'vision_encoder': get_resnet('resnet18'),
+            'noise_pred_net': ConditionalUnet1D(
+                input_dim=self.action_dim,
+                global_cond_dim=self.obs_dim * self.obs_horizon
+            )
+        }).to(self.args.gpu_id)
+
+        # Replace BatchNorm with GroupNorm
+        ema_nets['vision_encoder'] = replace_bn_with_gn(ema_nets['vision_encoder']).to(self.args.gpu_id)
+
+        # Load model weights
+        print(f"Loading model weights from {self.args.model_save}")
+        state_dict = torch.load(self.args.model_save, map_location=f"cuda:{self.args.gpu_id}")
+        ema_nets.load_state_dict(state_dict)
+
+        # Wrap with EMA weights
+        self.ema = EMAModel(parameters=ema_nets.parameters(), power=0.75)
+        self.ema.copy_to(ema_nets.parameters())  # Transfer EMA weights into the new model
+        ema_nets.eval()
+
+        # Diffusion scheduler
+        noise_scheduler = DDPMScheduler(
+            num_train_timesteps=self.num_diffusion_iters,
+            beta_schedule='squaredcos_cap_v2',
+            clip_sample=False,
+            prediction_type='epsilon'
+        )
+
+        print("Running validation...")
+        with torch.no_grad():
+            for env_id, loader in enumerate(self.val_loader_list):
+                for batch_idx, inputs in enumerate(loader):
+                    image = inputs[0].cuda(self.args.gpu_id)
+                    # odom  = inputs[1].cuda(self.args.gpu_id)[..., :3]
+                    goal  = inputs[2].cuda(self.args.gpu_id)[..., :3]
+                    traj  = inputs[3].cuda(self.args.gpu_id)[..., :3]  # (B, traj_len, 3)
+
+                    B = image.shape[0]
+                    image = image.unsqueeze(1).expand(-1, self.obs_horizon, -1, -1, -1)
+                    # agent_pos = odom.unsqueeze(1).expand(-1, self.obs_horizon, -1)
+                    agent_goal = goal.unsqueeze(1).expand(-1, self.obs_horizon, -1)
+
+                    image_features = ema_nets['vision_encoder'](image.flatten(end_dim=1))
+                    image_features = image_features.reshape(B, self.obs_horizon, -1)
+                    obs = torch.cat([image_features, agent_goal], dim=-1)
+                    obs_cond = obs.flatten(start_dim=1)
+
+                    noisy_action = torch.randn((B, self.pred_horizon, self.action_dim), device=image.device)
+                    naction = noisy_action
+
+                    noise_scheduler.set_timesteps(self.num_diffusion_iters)
+
+                    for k in noise_scheduler.timesteps:
+                        noise_pred = ema_nets['noise_pred_net'](
+                            sample=naction,
+                            timestep=k,
+                            global_cond=obs_cond
+                        )
+                        naction = noise_scheduler.step(
+                            model_output=noise_pred,
+                            timestep=k,
+                            sample=naction
+                        ).prev_sample
+
+                    # Convert and plot results
+                    naction = naction.detach().cpu().numpy()
+                    traj_gt = traj.detach().cpu().numpy()
+
+                    for i in range(min(4, B)):
+                        fig = plt.figure(figsize=(6, 6))
+                        # Plot 3D trajectory
+                        plt3d = fig.add_subplot(111)
+                        plt3d = plt.axes(projection='3d')
+                        plt3d.set_box_aspect([1, 1, 1])  # aspect ratio is 1:1:1
+                        plt3d.set_title(f"Env {env_id} | Batch {batch_idx} | Sample {i}")
+                        plt3d.set_xlabel("X")
+                        plt3d.set_ylabel("Y")
+                        plt3d.set_zlabel("Z")
+
+                        # Plot the trajectory
+                        plt3d.plot(traj_gt[i, :, 0], traj_gt[i, :, 1], traj_gt[i, :, 2], label='Ground Truth', linewidth=2)
+                        plt3d.plot(naction[i, :, 0], naction[i, :, 1], naction[i, :, 2], label='Predicted', linestyle='--', linewidth=2)
+                        plt3d.scatter(0, 0, 0, color='green', label='Start')
+                        plt3d.scatter(goal[i, 0].cpu(), goal[i, 1].cpu(), goal[i, 2].cpu(), color='red', label='Goal')
+                        plt3d.legend()
+                        plt3d.grid(True)
+                        plt3d.view_init(elev=20, azim=-35)
+                        plt.tight_layout()
+                        plt.savefig(f"val_vis/env{env_id}_batch{batch_idx}_sample_{i}.png")
+                        plt.close()
+            print(f"Validation done for env {env_id}")
 
 if __name__ == "__main__":
     trainer = PlannerNetTrainer()
     # trainer.test()
-    trainer.train()
+    # trainer.train()
+    trainer.validate()
