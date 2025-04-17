@@ -17,6 +17,9 @@ import tqdm
 import json
 import random
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+from diffusers.training_utils import EMAModel
+from diffusers.optimization import get_scheduler
+
 from dataloader import MultiEpochsDataLoader
 import argparse
 
@@ -158,8 +161,8 @@ class PlannerNetTrainer():
         self.root_folder = '.'
         self.load_config()
         self.parse_args()
-        # self.prepare_model()
         self.prepare_data()
+        self.prepare_model()
 
     def load_config(self):
         with open(os.path.join(os.path.dirname(self.root_folder), 'config', 'training_config.json')) as json_file:
@@ -258,7 +261,7 @@ class PlannerNetTrainer():
 
         self.args = parser.parse_args()
 
-    def train_epoch(self, epoch):
+    def test(self):
 
         env_num = len(self.train_loader_list)
         
@@ -275,16 +278,12 @@ class PlannerNetTrainer():
                     image = inputs[0].cuda(self.args.gpu_id)
                     odom  = inputs[1].cuda(self.args.gpu_id)
                     goal  = inputs[2].cuda(self.args.gpu_id)
-                    traj  = inputs[3].cuda(self.args.gpu_id)
+                    traj  = inputs[3].cuda(self.args.gpu_id)[0:3]
 
-            print("image size: ", image.shape)
-            print("odom size: ", odom.shape)
-            print("goal size: ", goal.shape)
-            print("traj_size: ", traj.shape)
 
             #################################################################
-            pred_horizon = 32
-            obs_horizon = 2
+            pred_horizon = self.pred_horizon
+            obs_horizon = self.obs_horizon
 
             vision_encoder = get_resnet('resnet18').to(self.args.gpu_id)
 
@@ -294,12 +293,12 @@ class PlannerNetTrainer():
             vision_encoder = replace_bn_with_gn(vision_encoder).to(self.args.gpu_id)
 
             # ResNet18 has output dim of 512
-            vision_feature_dim = 512
+            vision_feature_dim = self.vision_feature_dim
             # agent_pos is 2 dimensional
-            lowdim_obs_dim = 3
+            lowdim_obs_dim = self.lowdim_obs_dim
             # observation feature has 514 dims in total per step
-            obs_dim = vision_feature_dim + lowdim_obs_dim
-            action_dim = 3
+            obs_dim = self.obs_dim
+            action_dim = self.action_dim
 
             # create network object
             noise_pred_net = ConditionalUnet1D(
@@ -323,8 +322,8 @@ class PlannerNetTrainer():
                     image.flatten(end_dim=1))
                 image_features = image_features.reshape(*image.shape[:2],-1)
                 obs = torch.cat([image_features, agent_pos],dim=-1)
-                print("Observation shape: ", obs.shape)
-                print("Observation feature shape: ", obs.flatten(start_dim=1).shape)
+                # print("Observation shape: ", obs.shape)
+                # print("Observation feature shape: ", obs.flatten(start_dim=1).shape)
 
                 noised_action = torch.randn((4, pred_horizon, action_dim)).to(self.args.gpu_id)
                 diffusion_iter = torch.zeros((4,)).to(self.args.gpu_id)
@@ -359,8 +358,148 @@ class PlannerNetTrainer():
             device = torch.device('cuda')
             _ = nets.to(device)
 
+    def prepare_model(self):
+        self.num_epochs = 10
+        self.pred_horizon = 32
+        self.obs_horizon = 1
+        self.action_horizon = 8
+        # ResNet18 has output dim of 512
+        self.vision_feature_dim = 512
+        # agent_pos is 2 dimensional
+        self.lowdim_obs_dim = 3
+        self.goal_dim = 3
+        # observation feature has 514 dims in total per step
+        self.obs_dim = self.vision_feature_dim + self.lowdim_obs_dim + self.goal_dim
+        self.action_dim = 3
+
+        # vision encoder
+        self.vision_encoder = get_resnet('resnet18')
+        self.vision_encoder = replace_bn_with_gn(self.vision_encoder).to(self.args.gpu_id)
+        # create network object
+        self.noise_pred_net = ConditionalUnet1D(
+            input_dim=self.action_dim,
+            global_cond_dim=self.obs_dim*self.obs_horizon
+        ).to(self.args.gpu_id)
+
+        # the final arch has 2 parts
+        self.nets = nn.ModuleDict({
+            'vision_encoder': self.vision_encoder,
+            'noise_pred_net': self.noise_pred_net
+        }).to(self.args.gpu_id)
+
+        self.optimizer = torch.optim.AdamW(params=self.nets.parameters(),lr=1e-4, weight_decay=1e-6)
+
+        self.num_diffusion_iters = 100
+
+        # Calculate total steps
+        steps_per_epoch = sum(len(loader) for loader in self.train_loader_list)
+        total_steps = steps_per_epoch * self.num_epochs
+
+        # Build LR scheduler
+        self.lr_scheduler = get_scheduler(
+            name='cosine',
+            optimizer=self.optimizer,
+            num_warmup_steps=500,
+            num_training_steps=total_steps
+        )
+
+
+    def train(self):
+        from tqdm import tqdm
+        # Build model
+        vision_encoder = get_resnet('resnet18').to(self.args.gpu_id)
+        vision_encoder = replace_bn_with_gn(vision_encoder).to(self.args.gpu_id)
+
+        noise_pred_net = ConditionalUnet1D(
+            input_dim=self.action_dim,
+            global_cond_dim=self.obs_dim * self.obs_horizon
+        ).to(self.args.gpu_id)
+
+        self.nets = nn.ModuleDict({
+            'vision_encoder': vision_encoder,
+            'noise_pred_net': noise_pred_net
+        }).to(self.args.gpu_id)
+
+        self.ema = EMAModel(
+            parameters=self.nets.parameters(),
+            power=0.75)
+        
+        self.noise_pred_net = self.nets['noise_pred_net']
+
+        # Noise scheduler
+        self.noise_scheduler = DDPMScheduler(
+            num_train_timesteps=100,
+            beta_schedule='squaredcos_cap_v2',
+            clip_sample=True,
+            prediction_type='epsilon'
+        )
+
+        with tqdm(range(self.num_epochs), desc='Epoch') as tglobal:
+            for epoch_idx in tglobal:
+                epoch_loss = []
+
+                # Use train_loader_list as in test()
+                combined = self.train_loader_list.copy()
+                random.shuffle(combined)
+
+                for env_id, loader in enumerate(combined):
+                    enumerater = tqdm(enumerate(loader), desc=f"Env {env_id}", leave=False)
+
+                    for batch_idx, inputs in enumerater:
+                        # === Load and transfer to GPU ===
+                        image = inputs[0].cuda(self.args.gpu_id)                           # (B, 3, H, W)
+                        odom  = inputs[1].cuda(self.args.gpu_id)[...,0:3]
+                        goal  = inputs[2].cuda(self.args.gpu_id)[...,0:3]
+                        traj  = inputs[3].cuda(self.args.gpu_id)[...,0:3]
+                         # (B, traj_len, 3)
+
+                        # === Format batch like in test() ===
+                        B = image.shape[0]
+                        image = image.unsqueeze(1).expand(-1, self.obs_horizon, -1, -1, -1)        # (B, H, 3, H, W)
+                        agent_pos = odom.unsqueeze(1).expand(-1, self.obs_horizon, -1)        # (B, H, 2)
+                        agent_goal = goal.unsqueeze(1).expand(-1, self.obs_horizon, -1)        # (B, H, 2)
+
+                        image_features = self.nets['vision_encoder'](image.flatten(end_dim=1))     # (B*H, F)
+                        image_features = image_features.reshape(B, self.obs_horizon, -1)           # (B, H, F)
+
+                        obs = torch.cat([image_features, agent_pos, agent_goal], dim=-1)                       # (B, H, F+2)
+                        obs_cond = obs.flatten(start_dim=1)                                        # (B, H*(F+2))
+
+                        # === Diffusion training ===
+                        noise = torch.randn((B, self.pred_horizon, self.action_dim), device=traj.device)
+
+                        timesteps = torch.randint(
+                            0, self.noise_scheduler.config.num_train_timesteps,
+                            (B,), device=traj.device
+                        ).long()
+
+                        noisy_actions = self.noise_scheduler.add_noise(traj[:, :self.pred_horizon, :self.action_dim], noise, timesteps)
+
+                        noise_pred = self.noise_pred_net(
+                            sample=noisy_actions,
+                            timestep=timesteps,
+                            global_cond=obs_cond
+                        )
+
+                        # === Loss and optimize ===
+                        loss = nn.functional.mse_loss(noise_pred, noise)
+
+                        loss.backward()
+                        self.optimizer.step()
+                        self.optimizer.zero_grad()
+                        self.lr_scheduler.step()
+                        self.ema.step(self.nets.parameters())
+
+                        loss_cpu = loss.item()
+                        epoch_loss.append(loss_cpu)
+                        enumerater.set_postfix(loss=loss_cpu)
+
+                tglobal.set_postfix(loss=np.mean(epoch_loss))
+
+        self.ema.copy_to(self.nets.parameters())
         return None
-    
+
 if __name__ == "__main__":
     trainer = PlannerNetTrainer()
-    trainer.train_epoch(1)
+    # trainer.test()
+    trainer.train()
