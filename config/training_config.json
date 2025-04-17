@@ -7,7 +7,7 @@
         "max-camera-depth": 3.0
     },
     "modelConfig": {
-        "model-save": "models/diffusion.pt",
+        "model-save": "models/diffusion_0417.pt",
         "resume": true,
         "in-channel": 16,
         "knodes": 5,
@@ -21,7 +21,7 @@
         "min-lr": 0.000001,
         "patience": 4,
         "epochs": 50,
-        "batch-size": 4,
+        "batch-size": 16,
         "w-decay": 0.001,
         "num-workers": 1,
         "gpu-id": 0
