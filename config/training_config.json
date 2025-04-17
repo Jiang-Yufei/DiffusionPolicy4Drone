@@ -21,9 +21,9 @@
         "min-lr": 0.000001,
         "patience": 4,
         "epochs": 50,
-        "batch-size": 16,
+        "batch-size": 4,
         "w-decay": 0.001,
-        "num-workers": 2,
+        "num-workers": 1,
         "gpu-id": 0
     },
     "logConfig": {

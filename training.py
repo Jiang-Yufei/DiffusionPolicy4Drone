@@ -60,27 +60,26 @@ class PlannerData(Dataset):
         self.traj_list    = []
         self.traj_length = 32
 
-        for ahead in range(1, max_episode+1, goal_step):
-            for i in range(N):
+        for ahead in range(0, max_episode, goal_step):
+            for i in range(N-1):
                 odom = odom_list[i]
-                goal = odom_list[min(i+ahead, N-1)]
+                goal = odom_list[min(i+self.traj_length, N-1)]
                 goal = (pp.Inv(odom) @ goal)
-                if i+self.traj_length >= N-1:
-                    continue
-                traj = odom_list[i:min(i+self.traj_length, N-1)]
+                    
+                traj = odom_list[i:min([i+self.traj_length, N-1])]
                 traj = [pp.Inv(odom) @ t for t in traj]
-                # gp = goal.tensor()
-                # if (gp[0] > 1.0 and gp[1]/gp[0] < 1.2 and gp[1]/gp[0] > -1.2 and torch.norm(gp[:3]) > 1.0):
-                if torch.norm(goal.tensor()[:3]) < min_distance:
+
+                traj = torch.stack(traj) # shape: (32, 7)
+                # print(traj.shape)
+
+                if traj.shape[0] < self.traj_length:
                     continue  # Skip this sample
 
                 self.img_filename.append(img_filename_list[i])
                 self.odom_list.append(odom.tensor())
                 self.goal_list.append(goal.tensor())
-                self.traj_list.append([t.tensor() for t in traj])
+                self.traj_list.append(torch.tensor(traj, dtype=torch.float32))
 
-                # print("odom_list type: ", type(self.odom_list))
-                # print("traj_list type: ", type(self.traj_list))
 
         N = len(self.odom_list)
 
@@ -103,13 +102,28 @@ class PlannerData(Dataset):
             self.odom_list    = itemgetter(*train_index)(self.odom_list)
             self.goal_list    = itemgetter(*train_index)(self.goal_list)
             self.traj_list    = itemgetter(*train_index)(self.traj_list)
+
+            while len(self.traj_list) > 0 and self.traj_list[-1].shape[0] != self.traj_length:
+                self.img_filename = self.img_filename[:-1]
+                self.odom_list    = self.odom_list[:-1]
+                self.goal_list    = self.goal_list[:-1]
+                self.traj_list    = self.traj_list[:-1]
+
         else:
             self.img_filename = itemgetter(*test_index)(self.img_filename)
             self.odom_list    = itemgetter(*test_index)(self.odom_list)
             self.goal_list    = itemgetter(*test_index)(self.goal_list)
             self.traj_list    = itemgetter(*test_index)(self.traj_list)
+            
+            while len(self.traj_list) > 0 and self.traj_list[-1].shape[0] != self.traj_length:
+                self.img_filename = self.img_filename[:-1]
+                self.odom_list    = self.odom_list[:-1]
+                self.goal_list    = self.goal_list[:-1]
+                self.traj_list    = self.traj_list[:-1]
 
         assert len(self.odom_list) == len(self.img_filename), "odom numbers should match with image numbers"
+        for traj in self.traj_list:
+            assert len(traj) == self.traj_length, "traj length shouldn't be %s" % (traj.shape,)
         
 
     def __len__(self):
@@ -130,7 +144,14 @@ class PlannerData(Dataset):
         image = Image.fromarray(image)
         image = self.transform(image).expand(3, -1, -1)
 
-        return image, self.odom_list[idx], self.goal_list[idx], self.traj_list[idx]
+        data = (image, self.odom_list[idx], self.goal_list[idx], self.traj_list[idx])
+
+        # assert wrong dims and print dims
+        assert self.odom_list[idx].shape == (7,)
+        assert self.goal_list[idx].shape == (7,)
+        assert self.traj_list[idx].shape == (self.traj_length, 7), "got %s when idx is %s" % (self.traj_list[idx].shape,idx)
+
+        return data
 
 class PlannerNetTrainer():
     def __init__(self):
@@ -160,6 +181,7 @@ class PlannerNetTrainer():
             self.train_loader_list = []
             self.val_loader_list   = []
             
+
             for env_name in tqdm.tqdm(self.env_list):
                 if not self.args.training and track_id != test_env_id:
                     track_id += 1
@@ -175,7 +197,8 @@ class PlannerNetTrainer():
                                         max_depth=self.args.max_camera_depth)
                 
                 total_img_data += len(train_data)
-                train_loader = MultiEpochsDataLoader(train_data, batch_size=self.args.batch_size, shuffle=True, num_workers=2)
+                train_loader = MultiEpochsDataLoader(train_data, batch_size=self.args.batch_size, shuffle=True, num_workers=4)
+                
                 self.train_loader_list.append(train_loader)
 
                 val_data = PlannerData(root=data_path,
@@ -185,7 +208,7 @@ class PlannerNetTrainer():
                                     max_episode=self.args.max_episode,
                                     max_depth=self.args.max_camera_depth)
 
-                val_loader = MultiEpochsDataLoader(val_data, batch_size=self.args.batch_size, shuffle=True, num_workers=2)
+                val_loader = MultiEpochsDataLoader(val_data, batch_size=self.args.batch_size, shuffle=True, num_workers=4)
                 self.val_loader_list.append(val_loader)
                 
             print("Data Loading Completed!")
@@ -253,84 +276,88 @@ class PlannerNetTrainer():
                     odom  = inputs[1].cuda(self.args.gpu_id)
                     goal  = inputs[2].cuda(self.args.gpu_id)
                     traj  = inputs[3].cuda(self.args.gpu_id)
-        print("traj_size: ", traj.shape)
 
-        #################################################################
-        pred_horizon = 32
-        obs_horizon = 2
+            print("image size: ", image.shape)
+            print("odom size: ", odom.shape)
+            print("goal size: ", goal.shape)
+            print("traj_size: ", traj.shape)
 
-        vision_encoder = get_resnet('resnet18').to(self.args.gpu_id)
+            #################################################################
+            pred_horizon = 32
+            obs_horizon = 2
 
-        # IMPORTANT!
-        # replace all BatchNorm with GroupNorm to work with EMA
-        # performance will tank if you forget to do this!
-        vision_encoder = replace_bn_with_gn(vision_encoder).to(self.args.gpu_id)
+            vision_encoder = get_resnet('resnet18').to(self.args.gpu_id)
 
-        # ResNet18 has output dim of 512
-        vision_feature_dim = 512
-        # agent_pos is 2 dimensional
-        lowdim_obs_dim = 3
-        # observation feature has 514 dims in total per step
-        obs_dim = vision_feature_dim + lowdim_obs_dim
-        action_dim = 3
+            # IMPORTANT!
+            # replace all BatchNorm with GroupNorm to work with EMA
+            # performance will tank if you forget to do this!
+            vision_encoder = replace_bn_with_gn(vision_encoder).to(self.args.gpu_id)
 
-        # create network object
-        noise_pred_net = ConditionalUnet1D(
-            input_dim=action_dim,
-            global_cond_dim=obs_dim*obs_horizon
-        ).to(self.args.gpu_id)
+            # ResNet18 has output dim of 512
+            vision_feature_dim = 512
+            # agent_pos is 2 dimensional
+            lowdim_obs_dim = 3
+            # observation feature has 514 dims in total per step
+            obs_dim = vision_feature_dim + lowdim_obs_dim
+            action_dim = 3
 
-        # the final arch has 2 parts
-        nets = nn.ModuleDict({
-            'vision_encoder': vision_encoder,
-            'noise_pred_net': noise_pred_net
-        }).to(self.args.gpu_id)
+            # create network object
+            noise_pred_net = ConditionalUnet1D(
+                input_dim=action_dim,
+                global_cond_dim=obs_dim*obs_horizon
+            ).to(self.args.gpu_id)
 
-        # demo
-        with torch.no_grad():
-            # example inputs
-            agent_pos = odom.unsqueeze(1).expand(-1, obs_horizon, -1)[...,0:3]
-            image = image.unsqueeze(1).expand(-1, obs_horizon, -1, -1, -1)
-            # vision encoder
-            image_features = nets['vision_encoder']( # 64 2 3 96 96
-                image.flatten(end_dim=1))
-            image_features = image_features.reshape(*image.shape[:2],-1)
-            obs = torch.cat([image_features, agent_pos],dim=-1)
-            print("Observation shape: ", obs.shape)
-            print("Observation feature shape: ", obs.flatten(start_dim=1).shape)
+            # the final arch has 2 parts
+            nets = nn.ModuleDict({
+                'vision_encoder': vision_encoder,
+                'noise_pred_net': noise_pred_net
+            }).to(self.args.gpu_id)
 
-            noised_action = torch.randn((8, pred_horizon, action_dim)).to(self.args.gpu_id)
-            diffusion_iter = torch.zeros((8,)).to(self.args.gpu_id)
+            # demo
+            with torch.no_grad():
+                # example inputs
+                agent_pos = odom.unsqueeze(1).expand(-1, obs_horizon, -1)[...,0:3]
+                image = image.unsqueeze(1).expand(-1, obs_horizon, -1, -1, -1)
+                # vision encoder
+                image_features = nets['vision_encoder']( # 64 2 3 96 96
+                    image.flatten(end_dim=1))
+                image_features = image_features.reshape(*image.shape[:2],-1)
+                obs = torch.cat([image_features, agent_pos],dim=-1)
+                print("Observation shape: ", obs.shape)
+                print("Observation feature shape: ", obs.flatten(start_dim=1).shape)
 
-            # the noise prediction network
-            # takes noisy action, diffusion iteration and observation as input
-            # predicts the noise added to action
-            noise = nets['noise_pred_net'](
-                sample=noised_action,
-                timestep=diffusion_iter,
-                global_cond=obs.flatten(start_dim=1))
+                noised_action = torch.randn((4, pred_horizon, action_dim)).to(self.args.gpu_id)
+                diffusion_iter = torch.zeros((4,)).to(self.args.gpu_id)
 
-            # illustration of removing noise
-            # the actual noise removal is performed by NoiseScheduler
-            # and is dependent on the diffusion noise schedule
-            denoised_action = noised_action - noise
+                # the noise prediction network
+                # takes noisy action, diffusion iteration and observation as input
+                # predicts the noise added to action
+                noise = nets['noise_pred_net'](
+                    sample=noised_action,
+                    timestep=diffusion_iter,
+                    global_cond=obs.flatten(start_dim=1))
 
-        # for this demo, we use DDPMScheduler with 100 diffusion iterations
-        num_diffusion_iters = 100
-        noise_scheduler = DDPMScheduler(
-            num_train_timesteps=num_diffusion_iters,
-            # the choise of beta schedule has big impact on performance
-            # we found squared cosine works the best
-            beta_schedule='squaredcos_cap_v2',
-            # clip output to [-1,1] to improve stability
-            clip_sample=True,
-            # our network predicts noise (instead of denoised action)
-            prediction_type='epsilon'
-        )
+                # illustration of removing noise
+                # the actual noise removal is performed by NoiseScheduler
+                # and is dependent on the diffusion noise schedule
+                denoised_action = noised_action - noise
 
-        # device transfer
-        device = torch.device('cuda')
-        _ = nets.to(device)
+            # for this demo, we use DDPMScheduler with 100 diffusion iterations
+            num_diffusion_iters = 100
+            noise_scheduler = DDPMScheduler(
+                num_train_timesteps=num_diffusion_iters,
+                # the choise of beta schedule has big impact on performance
+                # we found squared cosine works the best
+                beta_schedule='squaredcos_cap_v2',
+                # clip output to [-1,1] to improve stability
+                clip_sample=True,
+                # our network predicts noise (instead of denoised action)
+                prediction_type='epsilon'
+            )
+
+            # device transfer
+            device = torch.device('cuda')
+            _ = nets.to(device)
 
         return None
     
