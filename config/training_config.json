@@ -4,10 +4,10 @@
         "env-id": "training_list.txt",
         "env_type": "TrainingData",
         "crop-size": [360, 640],
-        "max-camera-depth": 3.0
+        "max-camera-depth": 10.0
     },
     "modelConfig": {
-        "model-save": "models/diffusion_0417_v2.pt",
+        "model-save": "models/diffusion_0417_v3.pt",
         "resume": true,
         "in-channel": 16,
         "knodes": 5,

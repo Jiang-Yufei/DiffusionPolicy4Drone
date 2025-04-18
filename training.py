@@ -214,7 +214,7 @@ class PlannerNetTrainer():
                                     max_episode=self.args.max_episode,
                                     max_depth=self.args.max_camera_depth)
 
-                val_loader = MultiEpochsDataLoader(val_data, batch_size=self.args.batch_size, shuffle=True, num_workers=4)
+                val_loader = MultiEpochsDataLoader(val_data, batch_size=self.args.batch_size, shuffle=False, num_workers=4)
                 self.val_loader_list.append(val_loader)
                 
             print("Data Loading Completed!")
@@ -565,28 +565,63 @@ class PlannerNetTrainer():
                     naction = naction.detach().cpu().numpy()
                     traj_gt = traj.detach().cpu().numpy()
 
-                    for i in range(min(4, B)):
-                        fig = plt.figure(figsize=(6, 6))
-                        # Plot 3D trajectory
-                        plt3d = fig.add_subplot(111)
-                        plt3d = plt.axes(projection='3d')
-                        plt3d.set_box_aspect([1, 1, 1])  # aspect ratio is 1:1:1
-                        plt3d.set_title(f"Env {env_id} | Batch {batch_idx} | Sample {i}")
-                        plt3d.set_xlabel("X")
-                        plt3d.set_ylabel("Y")
-                        plt3d.set_zlabel("Z")
+                    # for i in range(min(4, B)):
+                    #     fig = plt.figure(figsize=(6, 6))
+                    #     # Plot 3D trajectory
+                    #     plt3d = fig.add_subplot(111)
+                    #     plt3d = plt.axes(projection='3d')
+                    #     plt3d.set_box_aspect([1, 1, 1])  # aspect ratio is 1:1:1
+                    #     plt3d.set_title(f"Env {env_id} | Batch {batch_idx} | Sample {i}")
+                    #     plt3d.set_xlabel("X")
+                    #     plt3d.set_ylabel("Y")
+                    #     plt3d.set_zlabel("Z")
 
-                        # Plot the trajectory
-                        plt3d.plot(traj_gt[i, :, 0], traj_gt[i, :, 1], traj_gt[i, :, 2], label='Ground Truth', linewidth=2)
-                        plt3d.plot(naction[i, :, 0], naction[i, :, 1], naction[i, :, 2], label='Predicted', linestyle='--', linewidth=2)
-                        plt3d.scatter(0, 0, 0, color='green', label='Start')
-                        plt3d.scatter(goal[i, 0].cpu(), goal[i, 1].cpu(), goal[i, 2].cpu(), color='red', label='Goal')
-                        plt3d.legend()
-                        plt3d.grid(True)
-                        plt3d.view_init(elev=20, azim=-35)
+                    #     # Plot the trajectory
+                    #     plt3d.plot(traj_gt[i, :, 0], traj_gt[i, :, 1], traj_gt[i, :, 2], label='Ground Truth', linewidth=2)
+                    #     plt3d.plot(naction[i, :, 0], naction[i, :, 1], naction[i, :, 2], label='Predicted', linestyle='--', linewidth=2)
+                    #     plt3d.scatter(0, 0, 0, color='green', label='Start')
+                    #     plt3d.scatter(goal[i, 0].cpu(), goal[i, 1].cpu(), goal[i, 2].cpu(), color='red', label='Goal')
+                    #     plt3d.legend()
+                    #     plt3d.grid(True)
+                    #     plt3d.view_init(elev=20, azim=-35)
+                    #     plt.tight_layout()
+                    #     plt.savefig(f"val_vis/env{env_id}_batch{batch_idx}_sample_{i}.png")
+                    #     plt.close()
+                    for i in range(min(4, B)):
+                        fig = plt.figure(figsize=(10, 5))
+                        
+                        # --- Subplot 1: FPV image ---
+                        ax1 = fig.add_subplot(1, 2, 1)
+                        raw_image = inputs[0][i].cpu().numpy()  # shape: (3, H, W)
+                        raw_image = np.transpose(raw_image, (1, 2, 0))  # to (H, W, 3)
+
+                        ax1.imshow(raw_image[..., 0], cmap='gray')  # show depth map channel only
+                        ax1.axis('off')
+                        ax1.set_title("FPV Depth")
+
+                        # --- Subplot 2: 3D Trajectory ---
+                        ax2 = fig.add_subplot(1, 2, 2, projection='3d')
+                        ax2.set_box_aspect([1, 1, 1])
+                        ax2.set_title(f"Env {env_id} | Batch {batch_idx} | Sample {i}")
+                        ax2.set_xlabel("X")
+                        ax2.set_ylabel("Y")
+                        ax2.set_zlabel("Z")
+
+                        # Plot the predicted and ground truth trajectories
+                        ax2.plot(traj_gt[i, :, 0], traj_gt[i, :, 1], traj_gt[i, :, 2], label='Ground Truth', linewidth=2)
+                        ax2.plot(naction[i, :, 0], naction[i, :, 1], naction[i, :, 2], label='Predicted', linestyle='--', linewidth=2)
+                        ax2.scatter(0, 0, 0, color='green', label='Start')
+                        ax2.scatter(goal[i, 0].cpu(), goal[i, 1].cpu(), goal[i, 2].cpu(), color='red', label='Goal')
+                        ax2.legend()
+                        ax2.grid(True)
+                        ax2.view_init(elev=20, azim=-35)
+
+                        # --- Save and close ---
+                        os.makedirs("val_vis", exist_ok=True)
                         plt.tight_layout()
                         plt.savefig(f"val_vis/env{env_id}_batch{batch_idx}_sample_{i}.png")
                         plt.close()
+
             print(f"Validation done for env {env_id}")
 
 if __name__ == "__main__":
