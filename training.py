@@ -26,10 +26,8 @@ import matplotlib.pyplot as plt
 from dataloader import MultiEpochsDataLoader
 import argparse
 
-from dataset import create_sample_indices, sample_sequence, get_data_stats, normalize_data, unnormalize_data, PushTImageDataset
 from VisionEncoder import get_resnet, replace_submodules, replace_bn_with_gn
 from network import SinusoidalPosEmb, Downsample1d, Upsample1d, Conv1dBlock, ConditionalResidualBlock1D, ConditionalUnet1D
-from mpl_toolkits.mplot3d import Axes3D
 import imageio
 
 
