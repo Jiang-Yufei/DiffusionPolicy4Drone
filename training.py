@@ -29,6 +29,8 @@ import argparse
 from dataset import create_sample_indices, sample_sequence, get_data_stats, normalize_data, unnormalize_data, PushTImageDataset
 from VisionEncoder import get_resnet, replace_submodules, replace_bn_with_gn
 from network import SinusoidalPosEmb, Downsample1d, Upsample1d, Conv1dBlock, ConditionalResidualBlock1D, ConditionalUnet1D
+from mpl_toolkits.mplot3d import Axes3D
+import imageio
 
 
 class PlannerData(Dataset):
@@ -491,10 +493,10 @@ class PlannerNetTrainer():
         torch.save(self.nets.state_dict(), self.args.model_save)
 
         return None
-        
+
     def validate(self):
         print("Loading trained model for validation...")
-        
+
         # Create EMA nets with same architecture
         ema_nets = nn.ModuleDict({
             'vision_encoder': get_resnet('resnet18'),
@@ -504,20 +506,16 @@ class PlannerNetTrainer():
             )
         }).to(self.args.gpu_id)
 
-        # Replace BatchNorm with GroupNorm
         ema_nets['vision_encoder'] = replace_bn_with_gn(ema_nets['vision_encoder']).to(self.args.gpu_id)
 
-        # Load model weights
         print(f"Loading model weights from {self.args.model_save}")
         state_dict = torch.load(self.args.model_save, map_location=f"cuda:{self.args.gpu_id}")
         ema_nets.load_state_dict(state_dict)
 
-        # Wrap with EMA weights
         self.ema = EMAModel(parameters=ema_nets.parameters(), power=0.75)
-        self.ema.copy_to(ema_nets.parameters())  # Transfer EMA weights into the new model
+        self.ema.copy_to(ema_nets.parameters())
         ema_nets.eval()
 
-        # Diffusion scheduler
         noise_scheduler = DDPMScheduler(
             num_train_timesteps=self.num_diffusion_iters,
             beta_schedule='squaredcos_cap_v2',
@@ -530,13 +528,11 @@ class PlannerNetTrainer():
             for env_id, loader in enumerate(self.val_loader_list):
                 for batch_idx, inputs in enumerate(loader):
                     image = inputs[0].cuda(self.args.gpu_id)
-                    # odom  = inputs[1].cuda(self.args.gpu_id)[..., :3]
-                    goal  = inputs[2].cuda(self.args.gpu_id)[..., :3]
-                    traj  = inputs[3].cuda(self.args.gpu_id)[..., :3]  # (B, traj_len, 3)
+                    goal = inputs[2].cuda(self.args.gpu_id)[..., :3]
+                    traj = inputs[3].cuda(self.args.gpu_id)[..., :3]
 
                     B = image.shape[0]
                     image = image.unsqueeze(1).expand(-1, self.obs_horizon, -1, -1, -1)
-                    # agent_pos = odom.unsqueeze(1).expand(-1, self.obs_horizon, -1)
                     agent_goal = goal.unsqueeze(1).expand(-1, self.obs_horizon, -1)
 
                     image_features = ema_nets['vision_encoder'](image.flatten(end_dim=1))
@@ -546,8 +542,11 @@ class PlannerNetTrainer():
 
                     noisy_action = torch.randn((B, self.pred_horizon, self.action_dim), device=image.device)
                     naction = noisy_action
-
                     noise_scheduler.set_timesteps(self.num_diffusion_iters)
+
+                    # Save intermediate steps
+                    step_interval = self.num_diffusion_iters // 30  # finer steps for smoother gif
+                    intermediate_samples = []
 
                     for k in noise_scheduler.timesteps:
                         noise_pred = ema_nets['noise_pred_net'](
@@ -555,74 +554,50 @@ class PlannerNetTrainer():
                             timestep=k,
                             global_cond=obs_cond
                         )
-                        naction = noise_scheduler.step(
+                        step_result = noise_scheduler.step(
                             model_output=noise_pred,
                             timestep=k,
                             sample=naction
-                        ).prev_sample
+                        )
+                        naction = step_result.prev_sample
 
-                    # Convert and plot results
-                    naction = naction.detach().cpu().numpy()
+                        if k % step_interval == 0 or k == noise_scheduler.timesteps[-1]:
+                            intermediate_samples.append(naction.detach().cpu().clone())
+
                     traj_gt = traj.detach().cpu().numpy()
+                    os.makedirs("val_vis/diffusion_steps", exist_ok=True)
 
-                    # for i in range(min(4, B)):
-                    #     fig = plt.figure(figsize=(6, 6))
-                    #     # Plot 3D trajectory
-                    #     plt3d = fig.add_subplot(111)
-                    #     plt3d = plt.axes(projection='3d')
-                    #     plt3d.set_box_aspect([1, 1, 1])  # aspect ratio is 1:1:1
-                    #     plt3d.set_title(f"Env {env_id} | Batch {batch_idx} | Sample {i}")
-                    #     plt3d.set_xlabel("X")
-                    #     plt3d.set_ylabel("Y")
-                    #     plt3d.set_zlabel("Z")
+                    for i in range(min(1, B)):  # Just show one sample per batch
+                        gif_frames = []
+                        for j, traj_tensor in enumerate(intermediate_samples):
+                            fig = plt.figure(figsize=(6, 6))
+                            ax = fig.add_subplot(111, projection='3d')
+                            ax.set_title(f"Step {j * step_interval}")
+                            traj_np = traj_tensor[i].numpy()
 
-                    #     # Plot the trajectory
-                    #     plt3d.plot(traj_gt[i, :, 0], traj_gt[i, :, 1], traj_gt[i, :, 2], label='Ground Truth', linewidth=2)
-                    #     plt3d.plot(naction[i, :, 0], naction[i, :, 1], naction[i, :, 2], label='Predicted', linestyle='--', linewidth=2)
-                    #     plt3d.scatter(0, 0, 0, color='green', label='Start')
-                    #     plt3d.scatter(goal[i, 0].cpu(), goal[i, 1].cpu(), goal[i, 2].cpu(), color='red', label='Goal')
-                    #     plt3d.legend()
-                    #     plt3d.grid(True)
-                    #     plt3d.view_init(elev=20, azim=-35)
-                    #     plt.tight_layout()
-                    #     plt.savefig(f"val_vis/env{env_id}_batch{batch_idx}_sample_{i}.png")
-                    #     plt.close()
-                    for i in range(min(4, B)):
-                        fig = plt.figure(figsize=(10, 5))
-                        
-                        # --- Subplot 1: FPV image ---
-                        ax1 = fig.add_subplot(1, 2, 1)
-                        raw_image = inputs[0][i].cpu().numpy()  # shape: (3, H, W)
-                        raw_image = np.transpose(raw_image, (1, 2, 0))  # to (H, W, 3)
+                            ax.plot(traj_np[:, 0], traj_np[:, 1], traj_np[:, 2], linestyle='--', label='Predicted')
+                            ax.plot(traj_gt[i, :, 0], traj_gt[i, :, 1], traj_gt[i, :, 2], label='Ground Truth')
+                            ax.scatter(0, 0, 0, color='green', label='Start')
+                            ax.scatter(goal[i, 0].cpu(), goal[i, 1].cpu(), goal[i, 2].cpu(), color='red', label='Goal')
+                            ax.set_box_aspect([1, 1, 1])
+                            ax.legend()
+                            ax.grid(True)
+                            ax.view_init(elev=20, azim=-35)
 
-                        ax1.imshow(raw_image[..., 0], cmap='gray')  # show depth map channel only
-                        ax1.axis('off')
-                        ax1.set_title("FPV Depth")
+                            frame_path = f"val_vis/diffusion_steps/tmp_frame_{j}.png"
+                            plt.savefig(frame_path)
+                            gif_frames.append(frame_path)
+                            plt.close()
 
-                        # --- Subplot 2: 3D Trajectory ---
-                        ax2 = fig.add_subplot(1, 2, 2, projection='3d')
-                        ax2.set_box_aspect([1, 1, 1])
-                        ax2.set_title(f"Env {env_id} | Batch {batch_idx} | Sample {i}")
-                        ax2.set_xlabel("X")
-                        ax2.set_ylabel("Y")
-                        ax2.set_zlabel("Z")
+                        gif_out_path = f"val_vis/diffusion_steps/env{env_id}_batch{batch_idx}_sample{i}_denoising.gif"
+                        images = [imageio.imread(f) for f in gif_frames]
+                        imageio.mimsave(gif_out_path, images, duration=0.5)
 
-                        # Plot the predicted and ground truth trajectories
-                        ax2.plot(traj_gt[i, :, 0], traj_gt[i, :, 1], traj_gt[i, :, 2], label='Ground Truth', linewidth=2)
-                        ax2.plot(naction[i, :, 0], naction[i, :, 1], naction[i, :, 2], label='Predicted', linestyle='--', linewidth=2)
-                        ax2.scatter(0, 0, 0, color='green', label='Start')
-                        ax2.scatter(goal[i, 0].cpu(), goal[i, 1].cpu(), goal[i, 2].cpu(), color='red', label='Goal')
-                        ax2.legend()
-                        ax2.grid(True)
-                        ax2.view_init(elev=20, azim=-35)
+                        # Clean up temp frames
+                        for f in gif_frames:
+                            os.remove(f)
 
-                        # --- Save and close ---
-                        os.makedirs("val_vis", exist_ok=True)
-                        plt.tight_layout()
-                        plt.savefig(f"val_vis/env{env_id}_batch{batch_idx}_sample_{i}.png")
-                        plt.close()
-
-            print(f"Validation done for env {env_id}")
+                print(f"Validation done for env {env_id}")
 
 if __name__ == "__main__":
     trainer = PlannerNetTrainer()
