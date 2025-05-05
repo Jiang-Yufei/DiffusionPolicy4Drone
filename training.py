@@ -407,14 +407,94 @@ class PlannerNetTrainer():
         )
 
 
-    def train(self):
-        self.ema = EMAModel(
-            parameters=self.nets.parameters(),
-            power=0.75)
+    # def train(self):
+    #     self.ema = EMAModel(
+    #         parameters=self.nets.parameters(),
+    #         power=0.75)
         
+    #     self.noise_pred_net = self.nets['noise_pred_net']
+
+    #     # Noise scheduler
+    #     self.noise_scheduler = DDPMScheduler(
+    #         num_train_timesteps=100,
+    #         beta_schedule='squaredcos_cap_v2',
+    #         clip_sample=False,
+    #         prediction_type='epsilon'
+    #     )
+
+    #     with tqdm(range(self.num_epochs), desc='Epoch') as tglobal:
+    #         for epoch_idx in tglobal:
+    #             epoch_loss = []
+
+    #             # Use train_loader_list as in test()
+    #             combined = self.train_loader_list.copy()
+    #             random.shuffle(combined)
+
+    #             for env_id, loader in enumerate(combined):
+    #                 enumerater = tqdm(enumerate(loader), desc=f"Env {env_id}", leave=False)
+
+    #                 for batch_idx, inputs in enumerater:
+    #                     # === Load and transfer to GPU ===
+    #                     image = inputs[0].cuda(self.args.gpu_id)                       
+    #                     # odom  = inputs[1].cuda(self.args.gpu_id)[...,0:3]
+    #                     goal  = inputs[2].cuda(self.args.gpu_id)[...,0:3]
+    #                     traj  = inputs[3].cuda(self.args.gpu_id)[...,0:3]
+    #                      # (B, traj_len, 3)
+
+    #                     # === Format batch like in test() ===
+    #                     B = image.shape[0]
+    #                     image = image.unsqueeze(1).expand(-1, self.obs_horizon, -1, -1, -1)        
+    #                     # agent_pos = odom.unsqueeze(1).expand(-1, self.obs_horizon, -1)     
+    #                     agent_goal = goal.unsqueeze(1).expand(-1, self.obs_horizon, -1)      
+
+    #                     image_features = self.nets['vision_encoder'](image.flatten(end_dim=1))   
+    #                     image_features = image_features.reshape(B, self.obs_horizon, -1)          
+
+    #                     obs = torch.cat([image_features, agent_goal], dim=-1)                      
+    #                     obs_cond = obs.flatten(start_dim=1)                                     
+
+    #                     # === Diffusion training ===
+    #                     noise = torch.randn((B, self.pred_horizon, self.action_dim), device=traj.device)
+
+    #                     timesteps = torch.randint(
+    #                         0, self.noise_scheduler.config.num_train_timesteps,
+    #                         (B,), device=traj.device
+    #                     ).long()
+
+    #                     noisy_actions = self.noise_scheduler.add_noise(traj[:, :self.pred_horizon, :self.action_dim], noise, timesteps)
+    #                     # print("before:", traj)
+    #                     # print("after:", noisy_actions)
+    #                     noise_pred = self.noise_pred_net(
+    #                         sample=noisy_actions,
+    #                         timestep=timesteps,
+    #                         global_cond=obs_cond
+    #                     )
+
+    #                     # === Loss and optimize ===
+    #                     loss = nn.functional.mse_loss(noise_pred, noise)
+
+    #                     loss.backward()
+    #                     self.optimizer.step()
+    #                     self.optimizer.zero_grad()
+    #                     self.lr_scheduler.step()
+    #                     self.ema.step(self.nets.parameters())
+
+    #                     loss_cpu = loss.item()
+    #                     epoch_loss.append(loss_cpu)
+    #                     enumerater.set_postfix(loss=loss_cpu)
+
+    #             tglobal.set_postfix(loss=np.mean(epoch_loss))
+
+    #     self.ema.copy_to(self.nets.parameters())
+
+    #     # Save the model
+    #     torch.save(self.nets.state_dict(), self.args.model_save)
+
+    #     return None
+    def train(self):
+        self.ema = EMAModel(parameters=self.nets.parameters(), power=0.75)
         self.noise_pred_net = self.nets['noise_pred_net']
 
-        # Noise scheduler
         self.noise_scheduler = DDPMScheduler(
             num_train_timesteps=100,
             beta_schedule='squaredcos_cap_v2',
@@ -422,11 +502,11 @@ class PlannerNetTrainer():
             prediction_type='epsilon'
         )
 
+        all_epoch_losses = [] 
+        
         with tqdm(range(self.num_epochs), desc='Epoch') as tglobal:
             for epoch_idx in tglobal:
                 epoch_loss = []
-
-                # Use train_loader_list as in test()
                 combined = self.train_loader_list.copy()
                 random.shuffle(combined)
 
@@ -434,43 +514,36 @@ class PlannerNetTrainer():
                     enumerater = tqdm(enumerate(loader), desc=f"Env {env_id}", leave=False)
 
                     for batch_idx, inputs in enumerater:
-                        # === Load and transfer to GPU ===
                         image = inputs[0].cuda(self.args.gpu_id)                       
-                        # odom  = inputs[1].cuda(self.args.gpu_id)[...,0:3]
-                        goal  = inputs[2].cuda(self.args.gpu_id)[...,0:3]
-                        traj  = inputs[3].cuda(self.args.gpu_id)[...,0:3]
-                         # (B, traj_len, 3)
+                        goal  = inputs[2].cuda(self.args.gpu_id)[..., 0:3]
+                        traj  = inputs[3].cuda(self.args.gpu_id)[..., 0:3]
 
-                        # === Format batch like in test() ===
                         B = image.shape[0]
                         image = image.unsqueeze(1).expand(-1, self.obs_horizon, -1, -1, -1)        
-                        # agent_pos = odom.unsqueeze(1).expand(-1, self.obs_horizon, -1)     
                         agent_goal = goal.unsqueeze(1).expand(-1, self.obs_horizon, -1)      
 
                         image_features = self.nets['vision_encoder'](image.flatten(end_dim=1))   
                         image_features = image_features.reshape(B, self.obs_horizon, -1)          
-
                         obs = torch.cat([image_features, agent_goal], dim=-1)                      
                         obs_cond = obs.flatten(start_dim=1)                                     
 
-                        # === Diffusion training ===
                         noise = torch.randn((B, self.pred_horizon, self.action_dim), device=traj.device)
-
                         timesteps = torch.randint(
                             0, self.noise_scheduler.config.num_train_timesteps,
                             (B,), device=traj.device
                         ).long()
 
-                        noisy_actions = self.noise_scheduler.add_noise(traj[:, :self.pred_horizon, :self.action_dim], noise, timesteps)
-                        # print("before:", traj)
-                        # print("after:", noisy_actions)
+                        noisy_actions = self.noise_scheduler.add_noise(
+                            traj[:, :self.pred_horizon, :self.action_dim],
+                            noise, timesteps
+                        )
+
                         noise_pred = self.noise_pred_net(
                             sample=noisy_actions,
                             timestep=timesteps,
                             global_cond=obs_cond
                         )
 
-                        # === Loss and optimize ===
                         loss = nn.functional.mse_loss(noise_pred, noise)
 
                         loss.backward()
@@ -483,12 +556,33 @@ class PlannerNetTrainer():
                         epoch_loss.append(loss_cpu)
                         enumerater.set_postfix(loss=loss_cpu)
 
-                tglobal.set_postfix(loss=np.mean(epoch_loss))
+                epoch_avg_loss = np.mean(epoch_loss)
+                all_epoch_losses.append(epoch_avg_loss)
+                tglobal.set_postfix(loss=epoch_avg_loss)
 
         self.ema.copy_to(self.nets.parameters())
 
-        # Save the model
+        # === Save model ===
         torch.save(self.nets.state_dict(), self.args.model_save)
+
+        # === Save training loss to file ===
+        os.makedirs("logs", exist_ok=True)
+        loss_file = os.path.join("logs", "training_loss.txt")
+        with open(loss_file, 'w') as f:
+            for i, loss in enumerate(all_epoch_losses):
+                f.write(f"{i}\t{loss:.6f}\n")
+
+        # === Plot training loss ===
+        plt.figure(figsize=(8, 6))
+        plt.plot(all_epoch_losses, label="Training Loss", marker='o')
+        plt.xlabel("Epoch")
+        plt.ylabel("MSE Loss")
+        plt.title("Training Loss Over Epochs")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig("logs/training_loss.png")
+        plt.close()
 
         return None
 
@@ -600,5 +694,5 @@ class PlannerNetTrainer():
 if __name__ == "__main__":
     trainer = PlannerNetTrainer()
     # trainer.test()
-    # trainer.train()
-    trainer.validate()
+    trainer.train()
+    # trainer.validate()

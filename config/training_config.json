@@ -7,7 +7,7 @@
         "max-camera-depth": 10.0
     },
     "modelConfig": {
-        "model-save": "models/diffusion_0417_v3.pt",
+        "model-save": "models/diffusion_0430_v1.pt",
         "resume": true,
         "in-channel": 16,
         "knodes": 5,
