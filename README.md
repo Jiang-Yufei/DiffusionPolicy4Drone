@@ -9,7 +9,6 @@ This project trains a diffusion model to generate full 3D waypoint trajectories 
 
 The model predicts a fixed-length trajectory (default: 32 waypoints) conditioned on perception and target.
 
----
 
 ## Overview
 
@@ -27,7 +26,6 @@ where:
 
 The model learns to predict the added Gaussian noise (DDPM formulation).
 
----
 
 ## Model
 
@@ -37,7 +35,6 @@ The model learns to predict the added Gaussian noise (DDPM formulation).
 - Training objective: MSE between predicted and true noise
 - EMA applied during training
 
----
 
 ## Dataset Format
 
@@ -67,8 +64,6 @@ Each environment folder should contain:
 Each training sample contains:
 (image, goal_xyz, trajectory_xyz[32, 3])
 
-
----
 
 ## Training
 
