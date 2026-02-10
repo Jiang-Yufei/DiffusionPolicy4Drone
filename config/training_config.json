@@ -1,39 +1,45 @@
 {
-    "dataConfig": {
-        "data-root": "data",
-        "env-id": "training_list.txt",
-        "env_type": "TrainingData",
-        "crop-size": [360, 640],
-        "max-camera-depth": 10.0
+    "data": {
+      "data_root": "data",
+      "env_id": "training_list.txt",
+      "env_type": "TrainingData",
+      "crop_size": [360, 640],
+      "max_camera_depth": 10.0,
+      "train_split_ratio": 0.9,
+      "num_workers": 4
     },
-    "modelConfig": {
-        "model-save": "models/diffusion_0430_v1.pt",
-        "resume": true,
-        "in-channel": 16,
-        "knodes": 5,
-        "goal-step": 5,
-        "max-episode-length": 40
+    "diffusion": {
+      "pred_horizon": 32,
+      "obs_horizon": 1,
+      "action_dim": 3,
+      "num_train_timesteps": 100,
+      "beta_schedule": "squaredcos_cap_v2",
+      "prediction_type": "epsilon",
+      "ema_power": 0.75,
+      "warmup_steps": 500,
+      "lr_schedule": "cosine"
     },
-    "trainingConfig": {
-        "training": true,
-        "lr": 0.0001,
-        "factor": 0.1,
-        "min-lr": 0.000001,
-        "patience": 4,
-        "epochs": 50,
-        "batch-size": 16,
-        "w-decay": 0.001,
-        "num-workers": 1,
-        "gpu-id": 0
+    "task": {
+      "goal_step": 5,
+      "max_episode_length": 40,
+      "sensor_offset_x": 0.4,
+      "is_robot": true
     },
-    "logConfig": {
-        "log-save": "models/log-",
-        "test-env-id": 0,
-        "visual-number": 10
+    "train": {
+      "training": true,
+      "epochs": 50,
+      "batch_size": 16,
+      "lr": 0.0001,
+      "weight_decay": 0.000001,
+      "gpu_id": 0,
+      "seed": 0
     },
-    "sensorConfig": {
-        "camera-tilt": 0.2,
-        "sensor-offsetX-ANYmal": 0.4,
-        "fear-ahead-dist": 2.0
+    "checkpoint": {
+      "model_save": "models/diffusion_policy.pt",
+      "resume": false
+    },
+    "eval": {
+      "test_env_id": 0
     }
-}
+  }
+  

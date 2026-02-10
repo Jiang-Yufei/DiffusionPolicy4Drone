@@ -168,99 +168,122 @@ class PlannerNetTrainer():
         self.prepare_model()
 
     def load_config(self):
-        with open(os.path.join(os.path.dirname(self.root_folder), 'config', 'training_config.json')) as json_file:
-            self.config = json.load(json_file)
+        cfg_path = os.path.join(os.path.dirname(self.root_folder), 'config', 'training_config.json')
+        with open(cfg_path, 'r') as f:
+            self.config = json.load(f)
     
     def prepare_data(self):
-            ids_path = os.path.join(self.args.data_root, self.args.env_id)
-            with open(ids_path) as f:
-                self.env_list = [line.rstrip() for line in f.readlines()]
+        ids_path = os.path.join(self.args.data_root, self.args.env_id)
+        with open(ids_path) as f:
+            self.env_list = [line.rstrip() for line in f.readlines()]
 
-            depth_transform = transforms.Compose([
-                transforms.Resize((self.args.crop_size)),
-                transforms.ToTensor()])
-            
-            total_img_data = 0
-            track_id = 0
-            test_env_id = min(self.args.test_env_id, len(self.env_list)-1)
-            
-            self.train_loader_list = []
-            self.val_loader_list   = []
-            
+        depth_transform = transforms.Compose([
+            transforms.Resize((self.args.crop_size)),
+            transforms.ToTensor()
+        ])
 
-            for env_name in tqdm(self.env_list):
-                if not self.args.training and track_id != test_env_id:
-                    track_id += 1
-                    continue
-                
-                data_path = os.path.join(*[self.args.data_root, self.args.env_type, env_name])
+        total_img_data = 0
+        track_id = 0
+        test_env_id = min(self.args.test_env_id, len(self.env_list) - 1)
 
-                train_data = PlannerData(root=data_path,
-                                        train=True, 
-                                        transform=depth_transform,
-                                        goal_step=self.args.goal_step,
-                                        max_episode=self.args.max_episode,
-                                        max_depth=self.args.max_camera_depth)
-                
-                total_img_data += len(train_data)
-                train_loader = MultiEpochsDataLoader(train_data, batch_size=self.args.batch_size, shuffle=True, num_workers=4)
-                
-                self.train_loader_list.append(train_loader)
+        self.train_loader_list = []
+        self.val_loader_list = []
 
-                val_data = PlannerData(root=data_path,
-                                    train=False,
-                                    transform=depth_transform,
-                                    goal_step=self.args.goal_step,
-                                    max_episode=self.args.max_episode,
-                                    max_depth=self.args.max_camera_depth)
+        for env_name in tqdm(self.env_list):
+            if not self.args.training and track_id != test_env_id:
+                track_id += 1
+                continue
 
-                val_loader = MultiEpochsDataLoader(val_data, batch_size=self.args.batch_size, shuffle=False, num_workers=4)
-                self.val_loader_list.append(val_loader)
-                
-            print("Data Loading Completed!")
-            print("Number of image: %d | Number of goal-image pairs: %d"%(total_img_data, total_img_data * (int)(self.args.max_episode / self.args.goal_step)))
-            
-            return None 
-            
+            data_path = os.path.join(*[self.args.data_root, self.args.env_type, env_name])
+
+            train_data = PlannerData(
+                root=data_path,
+                train=True,
+                transform=depth_transform,
+                goal_step=self.args.goal_step,
+                max_episode=self.args.max_episode,
+                ratio=self.args.train_split_ratio,
+                max_depth=self.args.max_camera_depth,
+                sensorOffsetX=self.args.sensor_offset_x,
+                is_robot=self.args.is_robot,
+            )
+            total_img_data += len(train_data)
+            train_loader = MultiEpochsDataLoader(
+                train_data,
+                batch_size=self.args.batch_size,
+                shuffle=True,
+                num_workers=self.args.num_workers
+            )
+            self.train_loader_list.append(train_loader)
+
+            val_data = PlannerData(
+                root=data_path,
+                train=False,
+                transform=depth_transform,
+                goal_step=self.args.goal_step,
+                max_episode=self.args.max_episode,
+                ratio=self.args.train_split_ratio,
+                max_depth=self.args.max_camera_depth,
+                sensorOffsetX=self.args.sensor_offset_x,
+                is_robot=self.args.is_robot,
+            )
+            val_loader = MultiEpochsDataLoader(
+                val_data,
+                batch_size=self.args.batch_size,
+                shuffle=False,
+                num_workers=self.args.num_workers
+            )
+            self.val_loader_list.append(val_loader)
+
+        print("Data Loading Completed!")
+        print("Number of image: %d | Number of goal-image pairs: %d" % (
+            total_img_data, total_img_data * int(self.args.max_episode / self.args.goal_step)
+        ))
+          
     def parse_args(self):
-        parser = argparse.ArgumentParser(description='Training script for PlannerNet')
+        parser = argparse.ArgumentParser(description='Training script for DiffusionPolicy4Drone')
 
-        # dataConfig
-        parser.add_argument("--data-root", type=str, default=os.path.join(self.root_folder, self.config['dataConfig'].get('data-root')), help="dataset root folder")
-        parser.add_argument('--env-id', type=str, default=self.config['dataConfig'].get('env-id'), help='environment id list')
-        parser.add_argument('--env_type', type=str, default=self.config['dataConfig'].get('env_type'), help='the dataset type')
-        parser.add_argument('--crop-size', nargs='+', type=int, default=self.config['dataConfig'].get('crop-size'), help='image crop size')
-        parser.add_argument('--max-camera-depth', type=float, default=self.config['dataConfig'].get('max-camera-depth'), help='maximum depth detection of camera, unit: meter')
+        cfg = self.config
 
-        # modelConfig
-        parser.add_argument("--model-save", type=str, default=os.path.join(self.root_folder, self.config['modelConfig'].get('model-save')), help="model save point")
-        parser.add_argument('--resume', type=str, default=self.config['modelConfig'].get('resume'))
-        parser.add_argument('--in-channel', type=int, default=self.config['modelConfig'].get('in-channel'), help='goal input channel numbers')
-        parser.add_argument("--knodes", type=int, default=self.config['modelConfig'].get('knodes'), help="number of max nodes predicted")
-        parser.add_argument("--goal-step", type=int, default=self.config['modelConfig'].get('goal-step'), help="number of frames betwen goals")
-        parser.add_argument("--max-episode", type=int, default=self.config['modelConfig'].get('max-episode-length'), help="maximum episode frame length")
+        # ---------- data ----------
+        parser.add_argument("--data-root", type=str, default=os.path.join(self.root_folder, cfg["data"]["data_root"]))
+        parser.add_argument("--env-id", type=str, default=cfg["data"]["env_id"])
+        parser.add_argument("--env-type", type=str, default=cfg["data"]["env_type"])
+        parser.add_argument("--crop-size", nargs='+', type=int, default=cfg["data"]["crop_size"])
+        parser.add_argument("--max-camera-depth", type=float, default=cfg["data"]["max_camera_depth"])
+        parser.add_argument("--train-split-ratio", type=float, default=cfg["data"].get("train_split_ratio", 0.9))
+        parser.add_argument("--num-workers", type=int, default=cfg["data"].get("num_workers", 4))
 
-        # trainingConfig
-        parser.add_argument('--training', type=str, default=self.config['trainingConfig'].get('training'))
-        parser.add_argument("--lr", type=float, default=self.config['trainingConfig'].get('lr'), help="learning rate")
-        parser.add_argument("--factor", type=float, default=self.config['trainingConfig'].get('factor'), help="ReduceLROnPlateau factor")
-        parser.add_argument("--min-lr", type=float, default=self.config['trainingConfig'].get('min-lr'), help="minimum lr for ReduceLROnPlateau")
-        parser.add_argument("--patience", type=int, default=self.config['trainingConfig'].get('patience'), help="patience of epochs for ReduceLROnPlateau")
-        parser.add_argument("--epochs", type=int, default=self.config['trainingConfig'].get('epochs'), help="number of training epochs")
-        parser.add_argument("--batch-size", type=int, default=self.config['trainingConfig'].get('batch-size'), help="number of minibatch size")
-        parser.add_argument("--w-decay", type=float, default=self.config['trainingConfig'].get('w-decay'), help="weight decay of the optimizer")
-        parser.add_argument("--num-workers", type=int, default=self.config['trainingConfig'].get('num-workers'), help="number of workers for dataloader")
-        parser.add_argument("--gpu-id", type=int, default=self.config['trainingConfig'].get('gpu-id'), help="GPU id")
+        # ---------- task / sampling ----------
+        parser.add_argument("--goal-step", type=int, default=cfg["task"]["goal_step"])
+        parser.add_argument("--max-episode", type=int, default=cfg["task"]["max_episode_length"])
+        parser.add_argument("--sensor-offset-x", type=float, default=cfg["task"].get("sensor_offset_x", 0.0))
+        parser.add_argument("--is-robot", action="store_true" if cfg["task"].get("is_robot", True) else "store_false")
 
-        # logConfig
-        parser.add_argument("--log-save", type=str, default=os.path.join(self.root_folder, self.config['logConfig'].get('log-save')), help="train log file")
-        parser.add_argument('--test-env-id', type=int, default=self.config['logConfig'].get('test-env-id'), help='the test env id in the id list')
-        parser.add_argument('--visual-number', type=int, default=self.config['logConfig'].get('visual-number'), help='number of visualized trajectories')
+        # ---------- diffusion ----------
+        parser.add_argument("--pred-horizon", type=int, default=cfg["diffusion"]["pred_horizon"])
+        parser.add_argument("--obs-horizon", type=int, default=cfg["diffusion"]["obs_horizon"])
+        parser.add_argument("--action-dim", type=int, default=cfg["diffusion"]["action_dim"])
+        parser.add_argument("--num-train-timesteps", type=int, default=cfg["diffusion"]["num_train_timesteps"])
+        parser.add_argument("--beta-schedule", type=str, default=cfg["diffusion"]["beta_schedule"])
+        parser.add_argument("--prediction-type", type=str, default=cfg["diffusion"]["prediction_type"])
+        parser.add_argument("--ema-power", type=float, default=cfg["diffusion"]["ema_power"])
+        parser.add_argument("--warmup-steps", type=int, default=cfg["diffusion"].get("warmup_steps", 500))
+        parser.add_argument("--lr-schedule", type=str, default=cfg["diffusion"].get("lr_schedule", "cosine"))
 
-        # sensorConfig
-        parser.add_argument('--camera-tilt', type=float, default=self.config['sensorConfig'].get('camera-tilt'), help='camera tilt angle for visualization only')
-        parser.add_argument('--sensor-offsetX-ANYmal', type=float, default=self.config['sensorConfig'].get('sensor-offsetX-ANYmal'), help='anymal front camera sensor offset in X axis')
-        parser.add_argument("--fear-ahead-dist", type=float, default=self.config['sensorConfig'].get('fear-ahead-dist'), help="fear lookahead distance")
+        # ---------- training ----------
+        parser.add_argument("--training", type=bool, default=cfg["train"]["training"])
+        parser.add_argument("--epochs", type=int, default=cfg["train"]["epochs"])
+        parser.add_argument("--batch-size", type=int, default=cfg["train"]["batch_size"])
+        parser.add_argument("--lr", type=float, default=cfg["train"]["lr"])
+        parser.add_argument("--w-decay", type=float, default=cfg["train"]["weight_decay"])
+        parser.add_argument("--gpu-id", type=int, default=cfg["train"]["gpu_id"])
+        parser.add_argument("--seed", type=int, default=cfg["train"].get("seed", 0))
+
+        # ---------- checkpoint / eval ----------
+        parser.add_argument("--model-save", type=str, default=os.path.join(self.root_folder, cfg["checkpoint"]["model_save"]))
+        parser.add_argument("--resume", type=bool, default=cfg["checkpoint"].get("resume", False))
+        parser.add_argument("--test-env-id", type=int, default=cfg["eval"].get("test_env_id", 0))
 
         self.args = parser.parse_args()
 
@@ -362,148 +385,66 @@ class PlannerNetTrainer():
             _ = nets.to(device)
 
     def prepare_model(self):
-        self.pred_horizon = 32
-        self.obs_horizon = 1
-        self.action_horizon = 8
-        # ResNet18 has output dim of 512
+        # horizons / dims
+        self.pred_horizon = int(self.args.pred_horizon)
+        self.obs_horizon  = int(self.args.obs_horizon)
+        self.action_dim   = int(self.args.action_dim)
+
+        # vision encoder dims (ResNet18)
         self.vision_feature_dim = 512
-        # agent_pos is 2 dimensional
-        self.lowdim_obs_dim = 3
         self.goal_dim = 3
-        # observation feature has 514 dims in total per step
-        self.obs_dim = self.vision_feature_dim + self.goal_dim
-        self.action_dim = 3
+        self.obs_dim = self.vision_feature_dim + self.goal_dim  # 512 + 3
+
+        # diffusion iters
+        self.num_diffusion_iters = int(self.args.num_train_timesteps)
 
         # vision encoder
         self.vision_encoder = get_resnet('resnet18')
         self.vision_encoder = replace_bn_with_gn(self.vision_encoder).to(self.args.gpu_id)
-        # create network object
+
+        # noise prediction net
         self.noise_pred_net = ConditionalUnet1D(
             input_dim=self.action_dim,
-            global_cond_dim=self.obs_dim*self.obs_horizon
+            global_cond_dim=self.obs_dim * self.obs_horizon
         ).to(self.args.gpu_id)
 
-        # the final arch has 2 parts
         self.nets = nn.ModuleDict({
             'vision_encoder': self.vision_encoder,
             'noise_pred_net': self.noise_pred_net
         }).to(self.args.gpu_id)
 
-        self.optimizer = torch.optim.AdamW(params=self.nets.parameters(),lr=1e-4, weight_decay=1e-6)
+        self.optimizer = torch.optim.AdamW(
+            params=self.nets.parameters(),
+            lr=float(self.args.lr),
+            weight_decay=float(self.args.w_decay)
+        )
 
-        self.num_diffusion_iters = 100
-
-        # Calculate total steps
+        # total steps for LR scheduler
         steps_per_epoch = sum(len(loader) for loader in self.train_loader_list)
-        self.num_epochs = self.args.epochs
+        self.num_epochs = int(self.args.epochs)
         total_steps = steps_per_epoch * self.num_epochs
 
-        # Build LR scheduler
         self.lr_scheduler = get_scheduler(
-            name='cosine',
+            name=str(self.args.lr_schedule),
             optimizer=self.optimizer,
-            num_warmup_steps=500,
-            num_training_steps=total_steps
+            num_warmup_steps=int(self.args.warmup_steps),
+            num_training_steps=int(total_steps)
         )
 
 
-    # def train(self):
-    #     self.ema = EMAModel(
-    #         parameters=self.nets.parameters(),
-    #         power=0.75)
-        
-    #     self.noise_pred_net = self.nets['noise_pred_net']
-
-    #     # Noise scheduler
-    #     self.noise_scheduler = DDPMScheduler(
-    #         num_train_timesteps=100,
-    #         beta_schedule='squaredcos_cap_v2',
-    #         clip_sample=False,
-    #         prediction_type='epsilon'
-    #     )
-
-    #     with tqdm(range(self.num_epochs), desc='Epoch') as tglobal:
-    #         for epoch_idx in tglobal:
-    #             epoch_loss = []
-
-    #             # Use train_loader_list as in test()
-    #             combined = self.train_loader_list.copy()
-    #             random.shuffle(combined)
-
-    #             for env_id, loader in enumerate(combined):
-    #                 enumerater = tqdm(enumerate(loader), desc=f"Env {env_id}", leave=False)
-
-    #                 for batch_idx, inputs in enumerater:
-    #                     # === Load and transfer to GPU ===
-    #                     image = inputs[0].cuda(self.args.gpu_id)                       
-    #                     # odom  = inputs[1].cuda(self.args.gpu_id)[...,0:3]
-    #                     goal  = inputs[2].cuda(self.args.gpu_id)[...,0:3]
-    #                     traj  = inputs[3].cuda(self.args.gpu_id)[...,0:3]
-    #                      # (B, traj_len, 3)
-
-    #                     # === Format batch like in test() ===
-    #                     B = image.shape[0]
-    #                     image = image.unsqueeze(1).expand(-1, self.obs_horizon, -1, -1, -1)        
-    #                     # agent_pos = odom.unsqueeze(1).expand(-1, self.obs_horizon, -1)     
-    #                     agent_goal = goal.unsqueeze(1).expand(-1, self.obs_horizon, -1)      
-
-    #                     image_features = self.nets['vision_encoder'](image.flatten(end_dim=1))   
-    #                     image_features = image_features.reshape(B, self.obs_horizon, -1)          
-
-    #                     obs = torch.cat([image_features, agent_goal], dim=-1)                      
-    #                     obs_cond = obs.flatten(start_dim=1)                                     
-
-    #                     # === Diffusion training ===
-    #                     noise = torch.randn((B, self.pred_horizon, self.action_dim), device=traj.device)
-
-    #                     timesteps = torch.randint(
-    #                         0, self.noise_scheduler.config.num_train_timesteps,
-    #                         (B,), device=traj.device
-    #                     ).long()
-
-    #                     noisy_actions = self.noise_scheduler.add_noise(traj[:, :self.pred_horizon, :self.action_dim], noise, timesteps)
-    #                     # print("before:", traj)
-    #                     # print("after:", noisy_actions)
-    #                     noise_pred = self.noise_pred_net(
-    #                         sample=noisy_actions,
-    #                         timestep=timesteps,
-    #                         global_cond=obs_cond
-    #                     )
-
-    #                     # === Loss and optimize ===
-    #                     loss = nn.functional.mse_loss(noise_pred, noise)
-
-    #                     loss.backward()
-    #                     self.optimizer.step()
-    #                     self.optimizer.zero_grad()
-    #                     self.lr_scheduler.step()
-    #                     self.ema.step(self.nets.parameters())
-
-    #                     loss_cpu = loss.item()
-    #                     epoch_loss.append(loss_cpu)
-    #                     enumerater.set_postfix(loss=loss_cpu)
-
-    #             tglobal.set_postfix(loss=np.mean(epoch_loss))
-
-    #     self.ema.copy_to(self.nets.parameters())
-
-    #     # Save the model
-    #     torch.save(self.nets.state_dict(), self.args.model_save)
-
-    #     return None
     def train(self):
-        self.ema = EMAModel(parameters=self.nets.parameters(), power=0.75)
+        self.ema = EMAModel(parameters=self.nets.parameters(), power=float(self.args.ema_power))
         self.noise_pred_net = self.nets['noise_pred_net']
 
         self.noise_scheduler = DDPMScheduler(
-            num_train_timesteps=100,
-            beta_schedule='squaredcos_cap_v2',
+            num_train_timesteps=int(self.args.num_train_timesteps),
+            beta_schedule=str(self.args.beta_schedule),
             clip_sample=False,
-            prediction_type='epsilon'
+            prediction_type=str(self.args.prediction_type)
         )
 
-        all_epoch_losses = [] 
-        
+        all_epoch_losses = []
+
         with tqdm(range(self.num_epochs), desc='Epoch') as tglobal:
             for epoch_idx in tglobal:
                 epoch_loss = []
@@ -514,18 +455,20 @@ class PlannerNetTrainer():
                     enumerater = tqdm(enumerate(loader), desc=f"Env {env_id}", leave=False)
 
                     for batch_idx, inputs in enumerater:
-                        image = inputs[0].cuda(self.args.gpu_id)                       
+                        image = inputs[0].cuda(self.args.gpu_id)
                         goal  = inputs[2].cuda(self.args.gpu_id)[..., 0:3]
                         traj  = inputs[3].cuda(self.args.gpu_id)[..., 0:3]
 
                         B = image.shape[0]
-                        image = image.unsqueeze(1).expand(-1, self.obs_horizon, -1, -1, -1)        
-                        agent_goal = goal.unsqueeze(1).expand(-1, self.obs_horizon, -1)      
 
-                        image_features = self.nets['vision_encoder'](image.flatten(end_dim=1))   
-                        image_features = image_features.reshape(B, self.obs_horizon, -1)          
-                        obs = torch.cat([image_features, agent_goal], dim=-1)                      
-                        obs_cond = obs.flatten(start_dim=1)                                     
+                        image = image.unsqueeze(1).expand(-1, self.obs_horizon, -1, -1, -1)
+                        agent_goal = goal.unsqueeze(1).expand(-1, self.obs_horizon, -1)
+
+                        image_features = self.nets['vision_encoder'](image.flatten(end_dim=1))
+                        image_features = image_features.reshape(B, self.obs_horizon, -1)
+
+                        obs = torch.cat([image_features, agent_goal], dim=-1)
+                        obs_cond = obs.flatten(start_dim=1)
 
                         noise = torch.randn((B, self.pred_horizon, self.action_dim), device=traj.device)
                         timesteps = torch.randint(
@@ -535,7 +478,8 @@ class PlannerNetTrainer():
 
                         noisy_actions = self.noise_scheduler.add_noise(
                             traj[:, :self.pred_horizon, :self.action_dim],
-                            noise, timesteps
+                            noise,
+                            timesteps
                         )
 
                         noise_pred = self.noise_pred_net(
@@ -556,25 +500,21 @@ class PlannerNetTrainer():
                         epoch_loss.append(loss_cpu)
                         enumerater.set_postfix(loss=loss_cpu)
 
-                epoch_avg_loss = np.mean(epoch_loss)
+                epoch_avg_loss = float(np.mean(epoch_loss)) if len(epoch_loss) else 0.0
                 all_epoch_losses.append(epoch_avg_loss)
                 tglobal.set_postfix(loss=epoch_avg_loss)
 
         self.ema.copy_to(self.nets.parameters())
 
-        # === Save model ===
         torch.save(self.nets.state_dict(), self.args.model_save)
 
-        # === Save training loss to file ===
         os.makedirs("logs", exist_ok=True)
-        loss_file = os.path.join("logs", "training_loss.txt")
-        with open(loss_file, 'w') as f:
+        with open(os.path.join("logs", "training_loss.txt"), "w") as f:
             for i, loss in enumerate(all_epoch_losses):
                 f.write(f"{i}\t{loss:.6f}\n")
 
-        # === Plot training loss ===
         plt.figure(figsize=(8, 6))
-        plt.plot(all_epoch_losses, label="Training Loss", marker='o')
+        plt.plot(all_epoch_losses, label="Training Loss", marker="o")
         plt.xlabel("Epoch")
         plt.ylabel("MSE Loss")
         plt.title("Training Loss Over Epochs")
@@ -584,7 +524,6 @@ class PlannerNetTrainer():
         plt.savefig("logs/training_loss.png")
         plt.close()
 
-        return None
 
     def validate(self):
         print("Loading trained model for validation...")
@@ -604,15 +543,15 @@ class PlannerNetTrainer():
         state_dict = torch.load(self.args.model_save, map_location=f"cuda:{self.args.gpu_id}")
         ema_nets.load_state_dict(state_dict)
 
-        self.ema = EMAModel(parameters=ema_nets.parameters(), power=0.75)
+        self.ema = EMAModel(parameters=ema_nets.parameters(), power=float(self.args.ema_power))
         self.ema.copy_to(ema_nets.parameters())
         ema_nets.eval()
 
         noise_scheduler = DDPMScheduler(
-            num_train_timesteps=self.num_diffusion_iters,
-            beta_schedule='squaredcos_cap_v2',
+            num_train_timesteps=int(self.args.num_train_timesteps),
+            beta_schedule=str(self.args.beta_schedule),
             clip_sample=False,
-            prediction_type='epsilon'
+            prediction_type=str(self.args.prediction_type)
         )
 
         print("Running validation...")
